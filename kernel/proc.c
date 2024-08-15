@@ -26,6 +26,7 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -686,4 +687,24 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+
+// Get the number of processes whose state is not UNUSED. 
+int
+nproc(void)
+{
+  int n = 0;
+  struct proc *p;
+  int i;
+
+  for(i = 0; i < NPROC; i++) {
+    p = &proc[i];
+    acquire(&p->lock);
+    if(p->state != UNUSED)
+      n++;
+    release(&p->lock);
+  }
+
+  return n;
 }
