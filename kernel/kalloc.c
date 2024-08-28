@@ -23,10 +23,68 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct {
+  struct spinlock lock;
+  int refcnt[PHYSTOP/PGSIZE];
+} pa_refcnt;
+
+int
+pa_to_index(void *pa){
+  return (uint64)pa / PGSIZE;
+}
+
+void
+incr_refcnt(void *pa){
+  if((char*)pa < end || (uint64)pa >= PHYSTOP || ((uint64)pa % PGSIZE) != 0 ){
+    panic("Invalid physical address: incr_refcnt");
+  }
+
+  acquire(&pa_refcnt.lock);
+  pa_refcnt.refcnt[pa_to_index(pa)]++;
+  release(&pa_refcnt.lock);
+}
+
+void
+init_refcnt(void *pa){
+  if((char*)pa < end || (uint64)pa >= PHYSTOP || ((uint64)pa % PGSIZE) != 0 ){
+    panic("Invalid physical address: init_refcnt");
+  }
+
+  acquire(&pa_refcnt.lock);
+  pa_refcnt.refcnt[pa_to_index(pa)] = 1;
+  release(&pa_refcnt.lock);
+}
+
+void
+decr_refcnt(void *pa){
+  if((char*)pa < end || (uint64)pa >= PHYSTOP || ((uint64)pa % PGSIZE) != 0 ){
+    panic("Invalid physical address: decr_refcnt");
+  }
+
+  acquire(&pa_refcnt.lock);
+  pa_refcnt.refcnt[pa_to_index(pa)]--;
+  release(&pa_refcnt.lock);
+}
+
+int
+get_refcnt(void *pa){
+  if((char*)pa < end || (uint64)pa >= PHYSTOP || ((uint64)pa % PGSIZE) != 0 ){
+    panic("Invalid physical address: get_refcnt");
+  }
+
+  acquire(&pa_refcnt.lock);
+  int ret = pa_refcnt.refcnt[pa_to_index(pa)];
+  release(&pa_refcnt.lock);
+  return ret;
+}
+
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&pa_refcnt.lock, "refcnt");
+  memset(pa_refcnt.refcnt, 0, sizeof(pa_refcnt.refcnt));
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -51,6 +109,11 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  if(get_refcnt(pa) > 1){
+    decr_refcnt(pa);
+    return;
+  }
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -72,8 +135,10 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    init_refcnt((void*)r);
+  }
   release(&kmem.lock);
 
   if(r)

@@ -315,22 +315,25 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+      
     pa = PTE2PA(*pte);
+    
+    if(*pte & PTE_W){
+      *pte |= PTE_C;
+      *pte &= ~PTE_W;
+    }
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
+    incr_refcnt((void *)pa);
   }
   return 0;
 
@@ -363,8 +366,9 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    if(va0 >= MAXVA)
+    if(cow_alloc(pagetable, va0) < 0)
       return -1;
+  
     pte = walk(pagetable, va0, 0);
     if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
        (*pte & PTE_W) == 0)
@@ -448,4 +452,59 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+cow_alloc(pagetable_t pagetable, uint64 va)
+{
+  if(va >= MAXVA)
+    return -1;
+
+  uint64 current_pa, new_pa, page_aligned_va;
+  int flags;
+
+  pte_t *pte = walk(pagetable, va, 0);
+
+  if( pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+    return -1;
+
+  flags = PTE_FLAGS(*pte);
+  current_pa = PTE2PA(*pte);
+
+  page_aligned_va = PGROUNDDOWN(va);
+
+  if( (*pte & PTE_W) || !(*pte & PTE_C)){
+    return 0;
+  }
+
+  if(!(*pte & PTE_C) && !(*pte & PTE_W)){
+    return -1;
+  }
+
+  int ref_cnt = get_refcnt((void *)current_pa);
+    
+  if(ref_cnt > 1){
+    new_pa = (uint64) kalloc();
+    if(new_pa == 0){
+      panic("Failed to allocate memory: cow_alloc");
+    }
+
+    memmove((void *)new_pa, (const void *) current_pa, PGSIZE);
+    uvmunmap(pagetable, page_aligned_va, 1, 1);
+
+    flags |= PTE_W;
+    flags &= ~PTE_C;
+    
+    if(mappages(pagetable, page_aligned_va, PGSIZE, new_pa, flags) != 0){
+      kfree((void *)new_pa);
+      return -1;
+    }
+    return 0;
+  } else if(ref_cnt == 1){
+    *pte |= PTE_W;
+    *pte &= ~PTE_C;
+    return 0;
+  }
+
+  return -1;
 }
